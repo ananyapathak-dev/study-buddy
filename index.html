@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Study Buddy: simulated Alexa+ skill</title>
+<style>
+:root{--bg:#0e1b2c;--panel:#16283f;--ink:#eef4fb;--mute:#8fa6c0;--ring:#3dd6f5;--line:#26405e}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink);min-height:100vh}
+main{max-width:920px;margin:0 auto;padding:24px 16px;display:grid;gap:20px;grid-template-columns:1fr}
+@media(min-width:800px){main{grid-template-columns:1.2fr 1fr}}
+h1{font-size:1.5rem;margin:0 0 4px}
+p.sub{margin:0;color:var(--mute)}
+.echo{display:grid;place-items:center;padding:20px 0}
+.ring{width:120px;height:120px;border-radius:50%;border:6px solid var(--ring);box-shadow:0 0 0 0 rgba(61,214,245,.5)}
+.ring.on{animation:pulse 1.2s ease-out infinite}
+@keyframes pulse{to{box-shadow:0 0 0 28px rgba(61,214,245,0)}}
+@media(prefers-reduced-motion:reduce){.ring.on{animation:none;background:rgba(61,214,245,.2)}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+#log{min-height:160px;max-height:360px;overflow:auto;display:grid;gap:10px;align-content:start}
+.msg{padding:10px 12px;border-radius:10px;max-width:92%}
+.me{background:#24476e;justify-self:end}
+.bot{background:#0b1522;border:1px solid var(--line)}
+.bot ul{margin:6px 0 0;padding-left:18px}
+form{display:flex;gap:8px;margin-top:12px}
+input{flex:1;padding:12px;border-radius:8px;border:1px solid var(--line);background:#0b1522;color:var(--ink);font:inherit}
+button{padding:12px 14px;border-radius:8px;border:0;background:var(--ring);color:#06202b;font:inherit;font-weight:600;cursor:pointer}
+button.alt{background:transparent;color:var(--ring);border:1px solid var(--ring)}
+:focus-visible{outline:3px solid #fff;outline-offset:2px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.chips button{font-weight:400;font-size:.9rem}
+h2{font-size:1rem;margin:0 0 8px}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,Menlo,monospace;color:#bfe9f5}
+#timer{font-size:2.2rem;font-weight:700}
+</style>
+</head>
+<body>
+<main>
+<section>
+  <h1>Study Buddy</h1>
+  <p class="sub">A simulated Alexa+ skill. Talk or type, and Study Buddy calls tools to plan your study time.</p>
+  <div class="echo"><div id="ring" class="ring" aria-hidden="true"></div></div>
+  <div class="card">
+    <div id="log" aria-live="polite"></div>
+    <form id="f">
+      <input id="q" autocomplete="off" aria-label="Ask Study Buddy" placeholder='Try: "Plan DSA exam in 3 days, 2 hours daily"'>
+      <button type="submit">Ask</button>
+      <button type="button" id="mic" class="alt" aria-label="Speak">Speak</button>
+    </form>
+    <div class="chips">
+      <button class="alt" data-q="Plan my DSA exam in 3 days with 2 hours daily">3-day DSA plan</button>
+      <button class="alt" data-q="Plan maths exam in 5 days with 1 hour daily">5-day maths plan</button>
+      <button class="alt" data-q="I missed day 2">I missed day 2</button>
+      <button class="alt" data-q="Start a 25 minute focus timer">25 min focus timer</button>
+    </div>
+  </div>
+</section>
+<aside style="display:grid;gap:20px;align-content:start">
+  <div class="card"><h2>Focus timer</h2><div id="timer">00:00</div></div>
+  <div class="card"><h2>Calendar</h2><button id="ics" disabled>Add plan to calendar (.ics)</button><p class="sub" id="icsnote" style="margin-top:8px">Make a study plan first.</p></div>
+  <div class="card"><h2>Tool call (MCP-style)</h2><pre id="tool">Waiting for a request...</pre></div>
+</aside>
+</main>
+<script>
+// ---- Tools: what an Alexa+ MCP server would expose ----
+const TOOLS = {
+  create_study_plan({subject, days, hours_per_day}){
+    const phases = ["Learn core concepts","Practice problems","Revise weak topics","Mock test","Final revision"];
+    const plan = [];
+    for(let d=1; d<=days; d++){
+      const idx = Math.min(phases.length-1, Math.floor((d-1)/days*phases.length));
+      plan.push({day:d, focus:phases[idx], hours:hours_per_day, break:"10 min every 50 min"});
+    }
+    return {subject, total_hours: days*hours_per_day, plan};
+  },
+  start_focus_timer({minutes}){ return {started:true, minutes}; },
+  reschedule_plan({plan, missed_day}){
+    const i=missed_day-1, rest=plan.slice(i+1); if(i<0||i>=plan.length||!rest.length) return {plan, moved_hours:0};
+    const extra=plan[i].hours, add=Math.round(extra/rest.length*2)/2;
+    const np=plan.map((p,k)=> k===i ? {...p, focus:"Missed (moved)", hours:0} : k>i ? {...p, hours:p.hours+add} : p);
+    return {plan:np, moved_hours:extra, added_per_day:add};
+  },
+  export_calendar({plan, subject}){
+    const pad=n=>String(n).padStart(2,"0"); const base=new Date(); base.setHours(18,0,0,0);
+    const fmt=d=>d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+"T"+pad(d.getHours())+pad(d.getMinutes())+"00";
+    const ev=plan.map((p,i)=>{const a=new Date(base); a.setDate(a.getDate()+i+1); const b=new Date(a); b.setHours(a.getHours()+Math.ceil(p.hours));
+      return "BEGIN:VEVENT\nUID:sb"+i+"@studybuddy\nDTSTAMP:"+fmt(new Date())+"\nDTSTART:"+fmt(a)+"\nDTEND:"+fmt(b)+"\nSUMMARY:"+subject+" - "+p.focus+"\nEND:VEVENT";}).join("\n");
+    return {events:plan.length, ics:"BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//StudyBuddy//EN\n"+ev+"\nEND:VCALENDAR"};
+  }
+};
+
+// ---- Intent parsing (rule-based, runs fully offline) ----
+function parse(text){
+  const t = text.toLowerCase();
+  const num = re => { const m = t.match(re); return m ? +m[1] : null; };
+  if(/miss|skip|behind/.test(t)) return {tool:"reschedule_plan", args:{missed_day:num(/day\s*(\d+)/)||1}};
+  if(/timer|focus/.test(t) && /\d+\s*min/.test(t)) return {tool:"start_focus_timer", args:{minutes:num(/(\d+)\s*min/)}};
+  if(/plan|study|exam/.test(t)){
+    const subj = (t.match(/(?:plan|for|my)\s+([a-z ]+?)\s+(?:exam|test)/)||[])[1] || "your subject";
+    return {tool:"create_study_plan", args:{
+      subject: subj.trim(),
+      days: num(/(\d+)\s*day/) || 3,
+      hours_per_day: num(/(\d+(?:\.\d+)?)\s*h(?:ou)?r/) || 2 }};
+  }
+  return null;
+}
+
+const log = document.getElementById("log"), ring = document.getElementById("ring"), tool = document.getElementById("tool");
+function add(cls, html){ const d=document.createElement("div"); d.className="msg "+cls; d.innerHTML=html; log.appendChild(d); log.scrollTop=log.scrollHeight; return d; }
+function say(text){ if(!("speechSynthesis" in window)) return; speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(text); ring.classList.add("on"); u.onend=()=>ring.classList.remove("on"); speechSynthesis.speak(u); }
+const esc = s => s.replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+let tick;
+function runTimer(min){
+  clearInterval(tick); let s = min*60; const el = document.getElementById("timer");
+  const draw = () => el.textContent = String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0");
+  draw(); tick = setInterval(()=>{ s--; draw(); if(s<=0){ clearInterval(tick); add("bot","Focus time is over. Take a short break."); say("Focus time is over. Take a short break."); } },1000);
+}
+
+function handle(text){
+  add("me", esc(text));
+  const intent = parse(text);
+  if(!intent){ const m="I can plan your study days or start a focus timer. Try asking for a study plan."; add("bot", m); say(m); tool.textContent="No tool matched."; return; }
+  if(intent.tool==="reschedule_plan"){ if(!window.lastPlan){ const m="Make a study plan first, then tell me which day you missed."; add("bot",m); say(m); return; } intent.args.plan=window.lastPlan.plan; }
+  const result = TOOLS[intent.tool](intent.args);
+  tool.textContent = JSON.stringify({method:"tools/call", params:{name:intent.tool, arguments:intent.args}}, null, 2) + "\n\n" + JSON.stringify({result}, null, 2);
+  if(intent.tool==="create_study_plan"){
+    window.lastPlan=result; document.getElementById("ics").disabled=false; document.getElementById("icsnote").textContent="Saves each study day as an evening event.";
+    const items = result.plan.map(p=>`<li>Day ${p.day}: ${p.focus}, ${p.hours} h</li>`).join("");
+    add("bot", `Here is your ${result.plan.length}-day plan for ${esc(result.subject)} (${result.total_hours} hours total):<ul>${items}</ul>Take ${result.plan[0].break}.`);
+    say(`Here is your ${result.plan.length} day plan for ${result.subject}, ${result.total_hours} hours in total.`);
+  } else if(intent.tool==="reschedule_plan"){
+    window.lastPlan.plan=result.plan;
+    const items=result.plan.map(p=>`<li>Day ${p.day}: ${p.focus}, ${p.hours} h</li>`).join("");
+    add("bot",`No problem. I moved ${result.moved_hours} hours of day ${intent.args.missed_day} across the remaining days:<ul>${items}</ul>`);
+    say(`No problem. I moved ${result.moved_hours} hours across your remaining days.`);
+  } else {
+    runTimer(result.minutes);
+    const m=`Starting a ${result.minutes} minute focus timer. You can do this.`; add("bot", m); say(m);
+  }
+}
+
+document.getElementById("ics").addEventListener("click",()=>{
+  const r=TOOLS.export_calendar(window.lastPlan);
+  tool.textContent=JSON.stringify({method:"tools/call",params:{name:"export_calendar",arguments:{subject:window.lastPlan.subject,days:r.events}}},null,2)+"\n\n"+JSON.stringify({result:{events:r.events,file:"study-plan.ics"}},null,2);
+  const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([r.ics],{type:"text/calendar"})); a.download="study-plan.ics"; a.click();
+  const m="Done. I created "+r.events+" calendar events for your study plan."; add("bot",m); say(m);
+});
+document.getElementById("f").addEventListener("submit", e=>{ e.preventDefault(); const q=document.getElementById("q"); if(q.value.trim()) handle(q.value.trim()); q.value=""; });
+document.querySelectorAll(".chips button").forEach(b=>b.addEventListener("click",()=>handle(b.dataset.q)));
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const mic = document.getElementById("mic");
+if(SR){ const r=new SR(); r.lang="en-IN"; r.onresult=e=>handle(e.results[0][0].transcript); mic.onclick=()=>r.start(); } else { mic.disabled=true; mic.title="Speech input not supported in this browser"; }
+add("bot","Hi, I'm Study Buddy. Ask me to plan an exam or start a focus timer.");
+</script>
+</body>
+</html>
